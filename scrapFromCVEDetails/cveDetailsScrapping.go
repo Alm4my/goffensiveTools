@@ -2,18 +2,17 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/cheggaaa/pb/v3"
 	"github.com/tealeg/xlsx"
 )
 
-// struct to format the vulnerabilities
 type Vulnerability struct {
 	CVE                string
 	CWE                string
@@ -36,109 +35,112 @@ func main() {
 	// Base URL of the CVE details page
 	baseURL := "https://www.cvedetails.com/vulnerability-list.php?vendor_id=0&product_id=0&version_id=0"
 
-	// Prompt user for year, start and end page inputs
-	var startPage, endPage, year int
-	fmt.Print("Enter the year you're trying to scrap for: ")
-	_, err := fmt.Scanln(&year)
-	if err != nil {
-		return
-	}
+	// Prompt user for start and end page inputs
+	var startPage, endPage int
 	fmt.Print("Enter start page number: ")
-	_, err = fmt.Scanln(&startPage)
-	if err != nil {
-		return
-	}
+	fmt.Scanln(&startPage)
 	fmt.Print("Enter end page number: ")
-	_, err = fmt.Scanln(&endPage)
-	if err != nil {
-		return
-	}
+	fmt.Scanln(&endPage)
+
+	// Prompt user for export format
+	var exportFormat string
+	fmt.Print("Enter export format (csv or xlsx): ")
+	fmt.Scanln(&exportFormat)
 
 	// Create a slice to store the vulnerabilities
-	var vulnerabilities []Vulnerability
+	vulnerabilities := []Vulnerability{}
 
 	// Initialize the progress bar
 	bar := pb.StartNew(endPage - startPage + 1)
 
+	// Create a wait group to wait for all goroutines to finish
+	var wg sync.WaitGroup
+
 	// Loop through the pages
 	for page := startPage; page <= endPage; page++ {
-		// Construct the URL with page query
-		url := fmt.Sprintf("%s&page=%d&year=%d", baseURL, page, year)
+		// Increment the wait group counter
+		wg.Add(1)
 
-		// Fetch the HTML content from the web
-		resp, err := http.Get(url)
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer func(Body io.ReadCloser) {
-			err := Body.Close()
+		// Launch a goroutine to scrape the page
+		go func(page int) {
+			defer wg.Done()
+
+			// Construct the URL with page query
+			url := fmt.Sprintf("%s&page=%d", baseURL, page)
+
+			// Fetch the HTML content from the web
+			resp, err := http.Get(url)
 			if err != nil {
-
+				log.Fatal(err)
 			}
-		}(resp.Body)
+			defer resp.Body.Close()
 
-		// Create a new document and load the HTML content
-		doc, err := goquery.NewDocumentFromReader(resp.Body)
-		if err != nil {
-			log.Fatal(err)
-		}
+			// Create a new document and load the HTML content
+			doc, err := goquery.NewDocumentFromReader(resp.Body)
+			if err != nil {
+				log.Fatal(err)
+			}
 
-		// Find the total number of vulnerabilities on the current page
-		totalVulns := doc.Find("tr.srrowns").Length()
+			// Find the total number of vulnerabilities on the current page
+			totalVulns := doc.Find("tr.srrowns").Length()
 
-		// Find the rows with class 'srrowns'
-		doc.Find("tr.srrowns").Each(func(i int, rowSelection *goquery.Selection) {
-			// Create a new vulnerability object
-			vuln := Vulnerability{}
+			// Find the rows with class 'srrowns'
+			doc.Find("tr.srrowns").Each(func(i int, rowSelection *goquery.Selection) {
+				// Create a new vulnerability object
+				vuln := Vulnerability{}
 
-			// Get the cells in the row
-			rowSelection.Find("td").Each(func(j int, cellSelection *goquery.Selection) {
-				cellText := strings.TrimSpace(cellSelection.Text())
+				// Get the cells in the row
+				rowSelection.Find("td").Each(func(j int, cellSelection *goquery.Selection) {
+					cellText := strings.TrimSpace(cellSelection.Text())
 
-				// Extract the relevant data based on the cell's index
-				switch j {
-				case 1:
-					vuln.CVE = cellSelection.Find("a").Text()
-				case 2:
-					vuln.CWE = cellSelection.Find("a").Text()
-				case 3:
-					vuln.Summary = cellText
-				case 4:
-					vuln.Exploits = cellText
-				case 5:
-					vuln.VulnerabilityTypes = cellText
-				case 6:
-					vuln.PublishDate = cellText
-				case 7:
-					vuln.UpdateDate = cellText
-				case 8:
-					vuln.Score = cellText
-				case 9:
-					vuln.GainedAccessLevel = cellText
-				case 10:
-					vuln.AccessComplexity = cellText
-				case 11:
-					vuln.Authentication = cellText
-				case 12:
-					vuln.Confidentiality = cellText
-				case 13:
-					vuln.Integrity = cellText
-				case 14:
-					vuln.Availability = cellText
-				}
+					// Extract the relevant data based on the cell's index
+					switch j {
+					case 1:
+						vuln.CVE = cellSelection.Find("a").Text()
+					case 2:
+						vuln.CWE = cellSelection.Find("a").Text()
+					case 3:
+						vuln.Summary = cellText
+					case 4:
+						vuln.Exploits = cellText
+					case 5:
+						vuln.VulnerabilityTypes = cellText
+					case 6:
+						vuln.PublishDate = cellText
+					case 7:
+						vuln.UpdateDate = cellText
+					case 8:
+						vuln.Score = cellText
+					case 9:
+						vuln.GainedAccessLevel = cellText
+					case 10:
+						vuln.AccessComplexity = cellText
+					case 11:
+						vuln.Authentication = cellText
+					case 12:
+						vuln.Confidentiality = cellText
+					case 13:
+						vuln.Integrity = cellText
+					case 14:
+						vuln.Availability = cellText
+					}
+				})
+
+				// Find the next row and get the description
+				description := rowSelection.Next().Find("td.cvesummarylong").Text()
+				vuln.Description = strings.TrimSpace(description)
+
+				// Append the vulnerability to the slice
+				vulnerabilities = append(vulnerabilities, vuln)
 			})
 
-			// Find the next row and get the description
-			description := rowSelection.Next().Find("td.cvesummarylong").Text()
-			vuln.Description = strings.TrimSpace(description)
-
-			// Append the vulnerability to the slice
-			vulnerabilities = append(vulnerabilities, vuln)
-		})
-
-		// Increment the progress bar
-		bar.Add(totalVulns)
+			// Increment the progress bar
+			bar.Add(totalVulns)
+		}(page)
 	}
+
+	// Wait for all goroutines to finish
+	wg.Wait()
 
 	// Finish the progress bar
 	bar.Finish()
@@ -165,12 +167,11 @@ func main() {
 
 	var fileName string
 	fmt.Print("Enter the file name (default: vulnerabilities.csv[.xlsx]): ")
-	_, err = fmt.Scanln(&fileName)
+	_, _ = fmt.Scanln(&fileName)
 
 	// Prompt user for export format
-	var exportFormat string
 	fmt.Print("Enter export format (csv or xlsx): ")
-	_, err = fmt.Scanln(&exportFormat)
+	_, _ = fmt.Scanln(&exportFormat)
 
 	// Export the data based on the chosen format
 	switch strings.ToLower(exportFormat) {
@@ -194,27 +195,17 @@ func exportCSV(vulnerabilities []Vulnerability, filename string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-
-		}
-	}(file)
+	defer file.Close()
 
 	// Write the header
-	_, err = file.WriteString("CVE,CWE,Summary,Description,Exploits,Vulnerability Types,Publish Date,Update Date,Score,Gained Access Level,Access Complexity,Authentication,Confidentiality Impact,Integrity Impact,Availability Impact\n")
-	if err != nil {
-		return
-	}
+	file.WriteString("CVE,CWE,Summary,Description,Exploits,Vulnerability Types,Publish Date,Update Date,Score,Gained Access Level,Access Complexity,Authentication,Confidentiality Impact,Integrity Impact,Availability Impact\n")
 
 	// Write each vulnerability to the file
 	for _, vuln := range vulnerabilities {
-		_, err := file.WriteString(fmt.Sprintf("\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n",
-			vuln.CVE, vuln.CWE, vuln.Summary, vuln.Description, vuln.Exploits, vuln.VulnerabilityTypes, vuln.PublishDate, vuln.UpdateDate,
-			vuln.Score, vuln.GainedAccessLevel, vuln.AccessComplexity, vuln.Authentication, vuln.Confidentiality, vuln.Integrity, vuln.Availability))
-		if err != nil {
-			return
-		}
+		file.WriteString(fmt.Sprintf("\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"\n",
+			vuln.CVE, vuln.CWE, vuln.Summary, vuln.Description, vuln.Exploits, vuln.VulnerabilityTypes,
+			vuln.PublishDate, vuln.UpdateDate, vuln.Score, vuln.GainedAccessLevel, vuln.AccessComplexity,
+			vuln.Authentication, vuln.Confidentiality, vuln.Integrity, vuln.Availability))
 	}
 
 	fmt.Printf("Data exported to %s\n", filename)
